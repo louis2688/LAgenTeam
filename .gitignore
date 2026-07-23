@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# Env
+.env
+.env.local
+
+# Misc
+.DS_Store
+
+# Agent workspaces (tool execution artifacts)
+workspaces/
+
+# Playwright MCP output
+.playwright-mcp/
+*.playwright-mcp*

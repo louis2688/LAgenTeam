@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lagenteam
+      POSTGRES_PASSWORD: lagenteam
+      POSTGRES_DB: lagenteam
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lagenteam"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./apps/api
+    environment:
+      DATABASE_URL: postgresql://lagenteam:lagenteam@postgres:5432/lagenteam
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5}
+      OLLAMA_HOST: ${OLLAMA_HOST:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:1.7b}
+      DEFAULT_BUDGET_TOKENS: ${DEFAULT_BUDGET_TOKENS:-50000}
+      ALLOW_SHELL: ${ALLOW_SHELL:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets the container reach host Ollama
+    volumes:
+      - ./workspaces:/app/workspaces
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web:
+    build: ./apps/web
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
