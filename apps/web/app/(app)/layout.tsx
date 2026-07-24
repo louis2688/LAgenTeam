@@ -37,37 +37,61 @@ function Logo() {
 export default function ConsoleLayout({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const [theme, setTheme] = useState("dark");
-  useEffect(() => { setTheme(document.documentElement.getAttribute("data-theme") || "dark"); }, []);
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    const el = document.documentElement;
+    setTheme(el.getAttribute("data-theme") || "dark");
+    setCollapsed(el.getAttribute("data-collapsed") === "true");
+  }, []);
+
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("theme", next); } catch (e) {}
     setTheme(next);
   }
+  function toggleCollapse() {
+    const next = !collapsed;
+    const el = document.documentElement;
+    if (next) el.setAttribute("data-collapsed", "true");
+    else el.removeAttribute("data-collapsed");
+    try { localStorage.setItem("sidebar", next ? "collapsed" : "expanded"); } catch (e) {}
+    setCollapsed(next);
+  }
+
   return (
     <div className="app">
       <aside className="side">
-        <a href="/" className="brand">
-          <Logo />
-          <div>
-            <div className="sub">Autonomous Eng</div>
-            <div className="name">L<b>Agen</b>Team</div>
-          </div>
-        </a>
+        <div className="sidetop">
+          <a href="/" className="brand">
+            <Logo />
+            <div className="brandtext">
+              <div className="sub">Autonomous Eng</div>
+              <div className="name">L<b>Agen</b>Team</div>
+            </div>
+          </a>
+          <button className="collapse" onClick={toggleCollapse} title={collapsed ? "Expand" : "Collapse"} aria-label="Toggle sidebar">
+            {collapsed ? "»" : "«"}
+          </button>
+        </div>
         {NAV.map((g) => (
           <div key={g.grp}>
             <div className="grp">{g.grp}</div>
             {g.items.map((it: any) => (
-              <a key={it.label} href={it.soon ? undefined : it.href}
+              <a key={it.label} href={it.soon ? undefined : it.href} title={it.label}
                  className={`${path === it.href ? "active" : ""} ${it.soon ? "disabled" : ""}`}>
-                <span className="ico">{it.ico}</span>{it.label}
+                <span className="ico">{it.ico}</span><span className="lbl">{it.label}</span>
                 {it.soon && <span className="soon">soon</span>}
               </a>
             ))}
           </div>
         ))}
-        <div className="live"><span className="d" /> Live</div>
-        <button className="themebtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}</button>
+        <div className="live"><span className="d" /> <span className="lbl">Live</span></div>
+        <button className="themebtn" onClick={toggleTheme} title="Toggle theme">
+          <span className="tico">{theme === "dark" ? "☀" : "☾"}</span>
+          <span className="lbl">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+        </button>
       </aside>
       <main className="main">{children}</main>
     </div>

@@ -1,0 +1,6 @@
+name: designer
+task_class: design
+tools: [read_file, write_file]
+system_prompt: |
+  You are the Designer. Propose or implement the UX/visual aspects of the task. Keep
+  it concrete.
