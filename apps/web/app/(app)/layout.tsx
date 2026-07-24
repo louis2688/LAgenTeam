@@ -1,5 +1,6 @@
 "use client";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 const NAV = [
   { grp: "Operator", items: [
@@ -35,6 +36,14 @@ function Logo() {
 
 export default function ConsoleLayout({ children }: { children: React.ReactNode }) {
   const path = usePathname();
+  const [theme, setTheme] = useState("dark");
+  useEffect(() => { setTheme(document.documentElement.getAttribute("data-theme") || "dark"); }, []);
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    setTheme(next);
+  }
   return (
     <div className="app">
       <aside className="side">
@@ -58,6 +67,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
           </div>
         ))}
         <div className="live"><span className="d" /> Live</div>
+        <button className="themebtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}</button>
       </aside>
       <main className="main">{children}</main>
     </div>
