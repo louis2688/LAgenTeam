@@ -3,9 +3,8 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: lagenteam
-      POSTGRES_PASSWORD: lagenteam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lagenteam}
       POSTGRES_DB: lagenteam
-    ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lagenteam"]
@@ -15,9 +14,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-}", "--no-auth-warning", "ping"]
       interval: 3s
       timeout: 3s
       retries: 10
@@ -25,26 +24,36 @@ services:
   api:
     build: ./apps/api
     environment:
-      DATABASE_URL: postgresql://lagenteam:lagenteam@postgres:5432/lagenteam
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://lagenteam:${POSTGRES_PASSWORD:-lagenteam}@postgres:5432/lagenteam
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5}
       OLLAMA_HOST: ${OLLAMA_HOST:-}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:1.7b}
       DEFAULT_BUDGET_TOKENS: ${DEFAULT_BUDGET_TOKENS:-50000}
       ALLOW_SHELL: ${ALLOW_SHELL:-0}
+      API_TOKEN: ${API_TOKEN:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # lets the container reach host Ollama
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./workspaces:/app/workspaces
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 1g
+    pids_limit: 256
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
   web:
     build: ./apps/web
-    ports: ["3000:3000"]
+    environment:
+      API_ORIGIN: http://api:8000
+      API_TOKEN: ${API_TOKEN:-}
+    ports: ["127.0.0.1:3000:3000"]
+    security_opt: ["no-new-privileges:true"]
     depends_on: [api]
 
 volumes:

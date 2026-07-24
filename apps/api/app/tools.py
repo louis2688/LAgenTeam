@@ -1,15 +1,39 @@
 """Real tool execution for agents: a path-jailed, git-backed workspace per run.
 
-fs tools are always available. run_shell is arbitrary code execution, so it is
-gated behind ALLOW_SHELL and always cwd-jailed to the workspace with a timeout.
-Each workspace is a git repo with an empty baseline commit, so the review gate
-can show a real diff of everything the coder produced.
+run_shell is arbitrary code execution. It is gated behind ALLOW_SHELL, cwd-jailed to
+the workspace with a timeout, given a MINIMAL env (no secrets), and its output is
+redacted against the process's real secret values as defense in depth. NOTE: this is
+not a true sandbox. For untrusted/multi-tenant input, run it in an isolated container
+with its own network and no secret access.
 """
+import os
+import re
 import subprocess
 from pathlib import Path
 from .config import settings
 
 WORKSPACE_ROOT = Path(settings.workspace_root)
+
+_SECRET_ENV = ("ANTHROPIC_API_KEY", "DATABASE_URL", "REDIS_URL", "API_TOKEN",
+               "POSTGRES_PASSWORD", "REDIS_PASSWORD")
+_KEY_RE = re.compile(r"sk-ant-\S+")
+
+
+def _safe_env() -> dict:
+    # Minimal env for run_shell: never inherit the app's secrets.
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
+    env.setdefault("PATH", "/usr/local/bin:/usr/local/sbin:/usr/bin:/bin")
+    env.setdefault("HOME", "/tmp")
+    return env
+
+
+def _redact(s: str) -> str:
+    s = _KEY_RE.sub("[redacted]", s)
+    for k in _SECRET_ENV:
+        v = os.environ.get(k)
+        if v and len(v) >= 8:
+            s = s.replace(v, "[redacted]")
+    return s
 
 
 def _git(ws: Path, *args: str):
@@ -35,7 +59,6 @@ def workspace(run_id: int) -> Path:
 
 
 def diff(run_id: int) -> dict:
-    """Unified diff of everything written since the baseline commit."""
     ws = _ws_path(run_id)
     if not (ws / ".git").exists():
         return {"files": [], "patch": ""}
@@ -61,7 +84,6 @@ def commit(run_id: int, message: str) -> None:
 
 
 def _resolve(ws: Path, rel: str) -> Path:
-    # Path jail: the resolved target must be the workspace or live under it.
     target = (ws / rel).resolve()
     if target != ws and ws not in target.parents:
         raise ValueError(f"path escapes workspace: {rel!r}")
@@ -88,36 +110,24 @@ def run_shell(ws: Path, command: str) -> str:
     if not settings.allow_shell:
         return "run_shell is disabled (set ALLOW_SHELL=1 to enable)"
     try:
-        r = subprocess.run(command, shell=True, cwd=ws, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(command, shell=True, cwd=ws, capture_output=True, text=True,
+                           timeout=60, env=_safe_env())
     except subprocess.TimeoutExpired:
         return "run_shell: timed out after 60s"
-    return f"exit={r.returncode}\n{r.stdout}{r.stderr}"[:4000]
+    return _redact(f"exit={r.returncode}\n{r.stdout}{r.stderr}")[:4000]
 
 
 # --- Anthropic tool-use wiring ---
 
 _SCHEMAS = {
-    "read_file": {
-        "name": "read_file",
-        "description": "Read a UTF-8 text file from the run workspace.",
-        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-    },
-    "write_file": {
-        "name": "write_file",
-        "description": "Create or overwrite a UTF-8 text file in the run workspace.",
-        "input_schema": {"type": "object", "properties": {
-            "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
-    },
-    "list_dir": {
-        "name": "list_dir",
-        "description": "List entries in a workspace directory (default: workspace root).",
-        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
-    },
-    "run_shell": {
-        "name": "run_shell",
-        "description": "Run a shell command inside the workspace (may be disabled).",
-        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-    },
+    "read_file": {"name": "read_file", "description": "Read a UTF-8 text file from the run workspace.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    "write_file": {"name": "write_file", "description": "Create or overwrite a UTF-8 text file in the run workspace.",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    "list_dir": {"name": "list_dir", "description": "List entries in a workspace directory (default: workspace root).",
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+    "run_shell": {"name": "run_shell", "description": "Run a shell command inside the workspace (may be disabled).",
+        "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
 }
 _IMPL = {"read_file": read_file, "write_file": write_file, "list_dir": list_dir, "run_shell": run_shell}
 
@@ -132,5 +142,5 @@ def dispatch(ws: Path, name: str, args: dict) -> str:
         return f"unknown tool: {name}"
     try:
         return fn(ws, **args)
-    except Exception as e:  # noqa: BLE001 - tool errors return to the model as text, not crashes
-        return f"error: {e}"
+    except Exception as e:  # noqa: BLE001
+        return "error: tool call failed"

@@ -11,14 +11,19 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-5"
 
     ollama_host: str = ""
-    ollama_model: str = "qwen3"
+    ollama_model: str = "qwen3:1.7b"
 
     default_budget_tokens: int = 50000
+    max_budget_tokens: int = 2_000_000
     agents_dir: str = "agents"
 
     # Tool execution
     workspace_root: str = "workspaces"
     allow_shell: bool = False
+
+    # Security
+    api_token: str = ""                          # if set, required as Bearer on every API route
+    web_origin: str = "http://localhost:3000"    # allowed CORS origin
 
 
 settings = Settings()

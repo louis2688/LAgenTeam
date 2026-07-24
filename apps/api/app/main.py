@@ -1,10 +1,11 @@
 import asyncio
+import hmac
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from . import engine, events, agents as agents_mod, tools as tools_mod
 from .config import settings
 from .db import pool
@@ -12,25 +13,40 @@ from .router import tier_for
 
 
 class CreateRun(BaseModel):
-    goal: str
-    budget_tokens: int | None = None
+    goal: str = Field(min_length=1, max_length=8000)
+    budget_tokens: int | None = Field(default=None, ge=1, le=settings.max_budget_tokens)
 
 
 class Note(BaseModel):
-    note: str = ""
+    note: str = Field(default="", max_length=2000)
+
+
+async def require_auth(request: Request, authorization: str | None = Header(default=None)):
+    # Auth is enforced only when API_TOKEN is configured. /health stays open for probes.
+    if request.url.path == "/health" or not settings.api_token:
+        return
+    token = authorization or ""
+    if token.startswith("Bearer "):
+        token = token[7:].strip()
+    if not hmac.compare_digest(token, settings.api_token):
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await pool()  # init connection pool + schema
+    await pool()
+    await engine.reap_orphans()
     worker = asyncio.create_task(engine.worker_loop())
     yield
     worker.cancel()
 
 
-app = FastAPI(title="LAgenTeam", lifespan=lifespan)
+app = FastAPI(title="LAgenTeam", lifespan=lifespan, dependencies=[Depends(require_auth)])
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=[settings.web_origin],
+    allow_methods=["GET", "POST"],
+    allow_headers=["authorization", "content-type"],
 )
 
 
@@ -55,10 +71,8 @@ async def config():
 async def list_agents():
     order = {"triage": 0, "planner": 1, "coder": 2, "reviewer": 3}
     reg = agents_mod.registry()
-    items = [
-        {"name": n, "task_class": c["task_class"], "tier": tier_for(c["task_class"]), "tools": c.get("tools", [])}
-        for n, c in reg.items()
-    ]
+    items = [{"name": n, "task_class": c["task_class"], "tier": tier_for(c["task_class"]), "tools": c.get("tools", [])}
+             for n, c in reg.items()]
     items.sort(key=lambda a: order.get(a["name"], 99))
     return items
 
@@ -74,8 +88,7 @@ async def list_runs():
     p = await pool()
     rows = await p.fetch(
         "SELECT id, goal, status, budget_tokens, tokens_used, created_at, updated_at "
-        "FROM runs ORDER BY id DESC LIMIT 200"
-    )
+        "FROM runs ORDER BY id DESC LIMIT 200")
     return [dict(r) for r in rows]
 
 
@@ -86,7 +99,7 @@ async def get_run(run_id: int):
     if not run:
         raise HTTPException(404, "run not found")
     tasks = await p.fetch("SELECT * FROM tasks WHERE run_id=$1 ORDER BY position", run_id)
-    evs = await p.fetch("SELECT * FROM events WHERE run_id=$1 ORDER BY id", run_id)
+    evs = await p.fetch("SELECT * FROM events WHERE run_id=$1 ORDER BY id LIMIT 2000", run_id)
     return {"run": dict(run), "tasks": [dict(t) for t in tasks], "events": [dict(e) for e in evs]}
 
 
@@ -128,11 +141,11 @@ async def stream(run_id: int):
     async def gen():
         p = await pool()
         history = await p.fetch(
-            "SELECT id, type, data, task_id FROM events WHERE run_id=$1 ORDER BY id", run_id
-        )
+            "SELECT id, type, data, task_id FROM ("
+            "  SELECT id, type, data, task_id FROM events WHERE run_id=$1 ORDER BY id DESC LIMIT 1000"
+            ") t ORDER BY id", run_id)
         for e in history:
             yield _sse({"id": e["id"], "type": e["type"], "data": e["data"], "task_id": e["task_id"]})
-
         pubsub = events.redis().pubsub()
         await pubsub.subscribe(events.channel(run_id))
         try:

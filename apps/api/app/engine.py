@@ -14,8 +14,7 @@ async def create_run(goal: str, budget_tokens: int | None = None) -> int:
     budget = budget_tokens or settings.default_budget_tokens
     run_id = await p.fetchval(
         "INSERT INTO runs(goal, status, budget_tokens) VALUES($1,'queued',$2) RETURNING id",
-        goal, budget,
-    )
+        goal, budget)
     await events.emit(run_id, "run.created", {"goal": goal, "budget_tokens": budget})
     await _enqueue(run_id, "plan")
     return run_id
@@ -39,7 +38,6 @@ async def reject_run(run_id: int) -> bool:
 
 
 async def ship_run(run_id: int) -> bool:
-    """Approve the diff at the review gate: commit the workspace and mark done."""
     if not await _is_status(run_id, "needs_review"):
         return False
     tools.commit(run_id, "shipped via review gate")
@@ -52,8 +50,17 @@ async def request_changes(run_id: int, note: str = "") -> bool:
     if not await _is_status(run_id, "needs_review"):
         return False
     await _set_status(run_id, "rejected")
-    await events.emit(run_id, "run.changes_requested", {"note": note})
+    await events.emit(run_id, "run.changes_requested", {})
     return True
+
+
+async def reap_orphans() -> None:
+    """On startup, fail runs left mid-flight when the worker last stopped."""
+    p = await pool()
+    rows = await p.fetch("SELECT id FROM runs WHERE status IN ('queued','planning','running')")
+    for r in rows:
+        await _set_status(r["id"], "failed")
+        await events.emit(r["id"], "run.failed", {"reason": "interrupted by restart"})
 
 
 async def _enqueue(run_id: int, phase: str) -> None:
@@ -68,19 +75,25 @@ async def worker_loop() -> None:
             if item is None:
                 continue
             job = json.loads(item[1])
-            if job["phase"] == "plan":
-                await _plan(job["run_id"])
-            elif job["phase"] == "execute":
-                await _execute(job["run_id"])
+            rid = job.get("run_id")
+            try:
+                if job["phase"] == "plan":
+                    await _plan(rid)
+                elif job["phase"] == "execute":
+                    await _execute(rid)
+            except Exception as e:  # noqa: BLE001 - a failed job must not orphan the run
+                print("[worker] job error:", type(e).__name__)
+                try:
+                    await _fail(rid, "internal error")
+                except Exception:  # noqa: BLE001
+                    pass
         except asyncio.CancelledError:
             raise
-        except Exception as e:  # noqa: BLE001 - keep the worker alive across job failures
-            print(f"[worker] error: {e}")
+        except Exception as e:  # noqa: BLE001
+            print("[worker] loop error:", type(e).__name__)
 
 
 async def _triage(run_id: int, goal: str) -> str:
-    """Cheap local classification on the free tier (Ollama) to inform the planner.
-    Non-fatal: a failure just means no note."""
     triage = agents.get("triage")
     try:
         c = await providers.complete(tier_for(triage["task_class"]), triage["system_prompt"], f"Goal: {goal} /no_think")
@@ -88,8 +101,8 @@ async def _triage(run_id: int, goal: str) -> str:
         note = re.sub(r"<think>.*?</think>", "", c.text, flags=re.DOTALL).strip()
         await events.emit(run_id, "triage.done", {"classification": note[:200], "model": c.model})
         return note
-    except Exception as e:  # noqa: BLE001
-        await events.emit(run_id, "triage.skipped", {"error": str(e)})
+    except Exception:  # noqa: BLE001
+        await events.emit(run_id, "triage.skipped", {"reason": "unavailable"})
         return ""
 
 
@@ -105,7 +118,8 @@ async def _plan(run_id: int) -> None:
     try:
         c = await providers.complete(tier_for(planner["task_class"]), planner["system_prompt"], prompt)
     except Exception as e:  # noqa: BLE001
-        await _fail(run_id, f"planner error: {e}")
+        print("[plan] error:", type(e).__name__)
+        await _fail(run_id, "planner error")
         return
     await _add_tokens(run_id, c.tokens)
 
@@ -113,11 +127,8 @@ async def _plan(run_id: int) -> None:
     for i, t in enumerate(plan):
         agent_cfg = agents.get(t["agent"])
         await p.execute(
-            "INSERT INTO tasks(run_id, name, task_class, agent, model_tier, position) "
-            "VALUES($1,$2,$3,$4,$5,$6)",
-            run_id, t["name"], agent_cfg["task_class"], agent_cfg["name"],
-            tier_for(agent_cfg["task_class"]), i,
-        )
+            "INSERT INTO tasks(run_id, name, task_class, agent, model_tier, position) VALUES($1,$2,$3,$4,$5,$6)",
+            run_id, t["name"], agent_cfg["task_class"], agent_cfg["name"], tier_for(agent_cfg["task_class"]), i)
     await p.execute("UPDATE runs SET plan=$2, updated_at=now() WHERE id=$1", run_id, plan)
     await _set_status(run_id, "awaiting_approval")
     await events.emit(run_id, "plan.ready", {"tasks": plan, "tokens": c.tokens})
@@ -127,12 +138,8 @@ async def _plan(run_id: int) -> None:
 async def _execute(run_id: int) -> None:
     p = await pool()
     goal = await p.fetchval("SELECT goal FROM runs WHERE id=$1", run_id)
-    rows = await p.fetch(
-        "SELECT id, name, agent, model_tier FROM tasks WHERE run_id=$1 ORDER BY position",
-        run_id,
-    )
+    rows = await p.fetch("SELECT id, name, agent, model_tier FROM tasks WHERE run_id=$1 ORDER BY position", run_id)
     context = f"Goal: {goal}\n"
-    # ponytail: sequential DAG. Add depends_on + a parallel worker pool when a run needs it.
     for t in rows:
         if await _over_budget(run_id):
             await _set_status(run_id, "killed")
@@ -146,25 +153,19 @@ async def _execute(run_id: int) -> None:
         try:
             c = await _run_task(run_id, t["id"], agent_cfg, t["model_tier"], context + f"\nTask: {t['name']}")
         except Exception as e:  # noqa: BLE001
-            await p.execute("UPDATE tasks SET status='failed', output=$2 WHERE id=$1", t["id"], str(e))
-            await events.emit(run_id, "task.failed", {"error": str(e)}, task_id=t["id"])
-            await _fail(run_id, f"task '{t['name']}' failed")
+            print("[task] error:", type(e).__name__)
+            await p.execute("UPDATE tasks SET status='failed', output=$2 WHERE id=$1", t["id"], "task failed")
+            await events.emit(run_id, "task.failed", {"error": "internal error"}, task_id=t["id"])
+            await _fail(run_id, "task failed")
             return
 
         await _add_tokens(run_id, c.tokens)
-        await p.execute(
-            "UPDATE tasks SET status='done', output=$2, model=$3, tokens_used=$4 WHERE id=$1",
-            t["id"], c.text, c.model, c.tokens,
-        )
-        await events.emit(
-            run_id, "task.done",
-            {"name": t["name"], "model": c.model, "tokens": c.tokens, "output": c.text[:500]},
-            task_id=t["id"],
-        )
+        await p.execute("UPDATE tasks SET status='done', output=$2, model=$3, tokens_used=$4 WHERE id=$1",
+                        t["id"], c.text, c.model, c.tokens)
+        await events.emit(run_id, "task.done",
+            {"name": t["name"], "model": c.model, "tokens": c.tokens, "output": c.text[:500]}, task_id=t["id"])
         context += f"\n[{t['name']}] {c.text}\n"
 
-    # Post-execution review gate: if the coder produced files, hold for a human
-    # diff review before shipping; otherwise finish.
     d = tools.diff(run_id)
     if d["files"]:
         await _set_status(run_id, "needs_review")
@@ -177,13 +178,17 @@ async def _execute(run_id: int) -> None:
 async def _run_task(run_id, task_id, agent_cfg, tier, prompt):
     tool_names = agent_cfg.get("tools") or []
     if tool_names and tier == "cloud" and settings.anthropic_api_key:
+        p = await pool()
+        row = await p.fetchrow("SELECT tokens_used, budget_tokens FROM runs WHERE id=$1", run_id)
+        remaining = max(0, row["budget_tokens"] - row["tokens_used"]) if row else None
         ws = tools.workspace(run_id)
 
         async def on_tool(name, inp, out):
             await events.emit(run_id, "tool.call", {"tool": name, "input": inp}, task_id)
             await events.emit(run_id, "tool.result", {"tool": name, "output": out[:500]}, task_id)
 
-        return await providers.complete_with_tools(agent_cfg["system_prompt"], prompt, tool_names, ws, on_tool)
+        return await providers.complete_with_tools(
+            agent_cfg["system_prompt"], prompt, tool_names, ws, on_tool, budget_remaining=remaining)
     return await providers.complete(tier, agent_cfg["system_prompt"], prompt)
 
 
@@ -192,8 +197,7 @@ def _parse_plan(text: str, goal: str) -> list[dict]:
     try:
         start, end = text.find("["), text.rfind("]")
         parsed = json.loads(text[start:end + 1])
-        out = [{"name": str(t["name"]), "agent": t.get("agent", "coder")}
-               for t in parsed if t.get("name")]
+        out = [{"name": str(t["name"]), "agent": t.get("agent", "coder")} for t in parsed if t.get("name")]
         if out:
             return out
     except Exception:  # noqa: BLE001
@@ -213,10 +217,7 @@ async def _set_status(run_id: int, status: str) -> None:
 
 async def _add_tokens(run_id: int, tokens: int) -> None:
     p = await pool()
-    await p.execute(
-        "UPDATE runs SET tokens_used = tokens_used + $2, updated_at=now() WHERE id=$1",
-        run_id, tokens,
-    )
+    await p.execute("UPDATE runs SET tokens_used = tokens_used + $2, updated_at=now() WHERE id=$1", run_id, tokens)
 
 
 async def _over_budget(run_id: int) -> bool:
