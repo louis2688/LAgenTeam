@@ -80,9 +80,15 @@ system_prompt: |
 cd apps/api && pip install -r requirements.txt pytest && python -m pytest
 ```
 
-## Not built yet
+## Operator auth
 
-- Parallel task execution (runs are sequential for now)
-- A request-changes rework loop back to the coder
-- Auth on the console
-- The Projects / Workflows / Knowledge / Onboarding menu items are stubs
+Set `CONSOLE_PASSWORD` to require sign-in on the operator console (`/login`).
+The client portal stays public. Leave it empty for open local/dev access.
+`API_TOKEN` is still the service-to-service Bearer between web and API.
+
+## Recently shipped
+
+- Request-changes rework loop (feedback → coder → re-review)
+- Console login / session cookie when `CONSOLE_PASSWORD` is set
+- Parallel task waves (`wave` in the plan JSON; shared token budget)
+- Projects / Workflows / Knowledge / Onboarding pages (no more stub nav)

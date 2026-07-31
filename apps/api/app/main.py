@@ -71,8 +71,17 @@ async def config():
 async def list_agents():
     order = {"triage": 0, "planner": 1, "coder": 2, "reviewer": 3}
     reg = agents_mod.registry()
-    items = [{"name": n, "task_class": c["task_class"], "tier": tier_for(c["task_class"]), "tools": c.get("tools", [])}
-             for n, c in reg.items()]
+    items = []
+    for n, c in reg.items():
+        prompt = (c.get("system_prompt") or "").strip()
+        summary = prompt.split("\n", 1)[0][:220] if prompt else ""
+        items.append({
+            "name": n,
+            "task_class": c["task_class"],
+            "tier": tier_for(c["task_class"]),
+            "tools": c.get("tools", []),
+            "summary": summary,
+        })
     items.sort(key=lambda a: order.get(a["name"], 99))
     return items
 
@@ -118,7 +127,7 @@ async def approve(run_id: int):
 @app.post("/runs/{run_id}/reject")
 async def reject(run_id: int):
     if not await engine.reject_run(run_id):
-        raise HTTPException(409, "run is not awaiting approval")
+        raise HTTPException(409, "run is not awaiting approval or review")
     return {"ok": True}
 
 

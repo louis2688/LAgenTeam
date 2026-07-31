@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS runs (
     plan          JSONB,
     budget_tokens INTEGER NOT NULL,
     tokens_used   INTEGER NOT NULL DEFAULT 0,
+    review_note   TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     output      TEXT,
     tokens_used INTEGER NOT NULL DEFAULT 0,
     position    INTEGER NOT NULL DEFAULT 0,
+    wave        INTEGER,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -40,6 +42,12 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS events_run_idx ON events(run_id, id);
+"""
+
+# Idempotent upgrades for databases created before these columns existed.
+MIGRATIONS = """
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS review_note TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS wave INTEGER;
 """
 
 
@@ -58,4 +66,5 @@ async def pool() -> asyncpg.Pool:
         )
         async with _pool.acquire() as con:
             await con.execute(SCHEMA)
+            await con.execute(MIGRATIONS)
     return _pool

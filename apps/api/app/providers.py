@@ -41,8 +41,8 @@ async def _ollama(system: str, prompt: str) -> Completion:
 
 def _mock(system: str, prompt: str, tier: str) -> Completion:
     if tier == "cloud" and "Planner" in system:
-        text = '[{"name": "Implement the goal", "agent": "coder"}, ' \
-               '{"name": "Review the result", "agent": "reviewer"}]'
+        text = ('[{"name": "Implement the goal", "agent": "coder", "wave": 0}, '
+                '{"name": "Review the result", "agent": "reviewer", "wave": 1}]')
     else:
         text = f"[mock:{tier}] " + prompt.strip()[:200]
     return Completion(text=text, tokens=(len(system) + len(prompt)) // 4 or 1, model=f"mock-{tier}")

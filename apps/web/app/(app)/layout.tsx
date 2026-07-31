@@ -11,14 +11,14 @@ const NAV = [
     { href: "/monitoring", ico: "◔", label: "Monitoring" },
     { href: "/settings", ico: "⚙", label: "Settings" },
   ]},
-  { grp: "More", items: [
-    { label: "Projects", ico: "▧", soon: true },
-    { label: "Workflows", ico: "⇄", soon: true },
-    { label: "Knowledge", ico: "◫", soon: true },
+  { grp: "Workspace", items: [
+    { href: "/projects", ico: "▧", label: "Projects" },
+    { href: "/workflows", ico: "⇄", label: "Workflows" },
+    { href: "/knowledge", ico: "◫", label: "Knowledge" },
   ]},
   { grp: "Client View", items: [
     { href: "/portal", ico: "◈", label: "Client Portal" },
-    { label: "Onboarding", ico: "→", soon: true },
+    { href: "/onboarding", ico: "→", label: "Onboarding" },
   ]},
 ];
 
@@ -60,6 +60,13 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
     setCollapsed(next);
   }
 
+  async function logout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (e) {}
+    window.location.href = "/login";
+  }
+
   return (
     <div className="app">
       <aside className="side">
@@ -78,11 +85,10 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
         {NAV.map((g) => (
           <div key={g.grp}>
             <div className="grp">{g.grp}</div>
-            {g.items.map((it: any) => (
-              <a key={it.label} href={it.soon ? undefined : it.href} title={it.label}
-                 className={`${path === it.href ? "active" : ""} ${it.soon ? "disabled" : ""}`}>
+            {g.items.map((it) => (
+              <a key={it.label} href={it.href} title={it.label}
+                 className={path === it.href ? "active" : ""}>
                 <span className="ico">{it.ico}</span><span className="lbl">{it.label}</span>
-                {it.soon && <span className="soon">soon</span>}
               </a>
             ))}
           </div>
@@ -91,6 +97,10 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
         <button className="themebtn" onClick={toggleTheme} title="Toggle theme">
           <span className="tico">{theme === "dark" ? "☀" : "☾"}</span>
           <span className="lbl">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+        </button>
+        <button className="themebtn logout" onClick={logout} title="Sign out">
+          <span className="tico">⎋</span>
+          <span className="lbl">Sign out</span>
         </button>
       </aside>
       <main className="main">{children}</main>
