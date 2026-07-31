@@ -140,14 +140,10 @@ export default function Component() {
           </div>
         </div>
         <svg className="connectors" viewBox="0 0 100 40" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M50 0 L50 10 L12.5 10 L12.5 34" />
-          <path d="M50 0 L50 10 L37.5 10 L37.5 34" />
-          <path d="M50 0 L50 10 L62.5 10 L62.5 34" />
-          <path d="M50 0 L50 10 L87.5 10 L87.5 34" />
-          <path className="arrow" d="M10.2 31.5 L12.5 36.5 L14.8 31.5" />
-          <path className="arrow" d="M35.2 31.5 L37.5 36.5 L39.8 31.5" />
-          <path className="arrow" d="M60.2 31.5 L62.5 36.5 L64.8 31.5" />
-          <path className="arrow" d="M85.2 31.5 L87.5 36.5 L89.8 31.5" />
+          <path d="M50 0 L50 10 L12.5 10 L12.5 40" />
+          <path d="M50 0 L50 10 L37.5 10 L37.5 40" />
+          <path d="M50 0 L50 10 L62.5 10 L62.5 40" />
+          <path d="M50 0 L50 10 L87.5 10 L87.5 40" />
         </svg>
         <div className="orbit2">
           {sorted.length === 0 ? <div className="empty">Loading roster...</div> : sorted.map((a) => <Card key={a.name} name={a.name} />)}
