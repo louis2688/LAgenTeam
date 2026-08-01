@@ -3,6 +3,11 @@ from pathlib import Path
 import yaml
 from .config import settings
 
+# Agents that appear in the console roster and that the planner may schedule.
+# Extra YAML files (pm, po, scrum, designer, devops) stay on disk unused until wired.
+ACTIVE = ("triage", "planner", "architect", "coder", "tester", "reviewer", "docs")
+ACTIVE_ORDER = {n: i for i, n in enumerate(ACTIVE)}
+
 
 @lru_cache(maxsize=1)
 def registry() -> dict[str, dict]:
@@ -12,6 +17,11 @@ def registry() -> dict[str, dict]:
         cfg = yaml.safe_load(f.read_text(encoding="utf-8"))
         agents[cfg["name"]] = cfg
     return agents
+
+
+def active_registry() -> dict[str, dict]:
+    reg = registry()
+    return {n: reg[n] for n in ACTIVE if n in reg}
 
 
 def get(name: str) -> dict:

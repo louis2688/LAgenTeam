@@ -92,3 +92,13 @@ The client portal stays public. Leave it empty for open local/dev access.
 - Console login / session cookie when `CONSOLE_PASSWORD` is set
 - Parallel task waves (`wave` in the plan JSON; shared token budget)
 - Projects / Workflows / Knowledge / Onboarding pages (no more stub nav)
+- Real multi-project model (`/projects`, `project_id` on runs)
+- Stronger workspace sandbox (shell deny-list, read/write/workspace size caps)
+- Roster pruned to the execution set (triage → docs); unused YAML kept on disk
+- GitHub Actions CI (pytest + Next build) and Railway API deploy on `main`
+
+## Deploy notes
+
+- **Web:** Vercel project `lagenteam` — set `API_ORIGIN` and `API_TOKEN`
+- **API:** Railway project `lagenteam` (Postgres + Redis + api)
+- For GitHub → Railway deploys, add repo secret `RAILWAY_TOKEN` (Railway account/project token)

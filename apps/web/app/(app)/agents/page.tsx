@@ -6,10 +6,13 @@ import { API } from "@/lib/api";
 const DISPLAY: any = {
   triage: { nm: "Scout", rl: "Triage" },
   planner: { nm: "Vector", rl: "Planner" },
+  architect: { nm: "Beacon", rl: "Architect" },
   coder: { nm: "Forge", rl: "Coder" },
+  tester: { nm: "Probe", rl: "QA" },
   reviewer: { nm: "Sentinel", rl: "Reviewer" },
+  docs: { nm: "Scribe", rl: "Docs" },
 };
-const ORDER = ["triage", "planner", "coder", "reviewer"];
+const ORDER = ["triage", "planner", "architect", "coder", "tester", "reviewer", "docs"];
 
 export default function Component() {
   const [agents, setAgents] = useState<any[]>([]);
@@ -38,7 +41,7 @@ export default function Component() {
       <div className="phead">
         <div>
           <h1>Agents</h1>
-          <div className="desc">Your autonomous engineering team — config, not code</div>
+          <div className="desc">Execution roster — the agents the planner can schedule</div>
         </div>
       </div>
 
@@ -66,7 +69,7 @@ export default function Component() {
           ) : (
             <div className="orbit">
               {ordered.map((a: any) => {
-                const d = DISPLAY[a.name];
+                const d = DISPLAY[a.name] || { nm: a.name, rl: a.task_class };
                 return (
                   <div className="node" key={a.name}>
                     <div className="av">{d.nm.charAt(0)}</div>

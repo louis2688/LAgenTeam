@@ -10,13 +10,24 @@ from .router import tier_for
 QUEUE = "lagenteam:queue"
 
 
-async def create_run(goal: str, budget_tokens: int | None = None) -> int:
+async def create_run(
+    goal: str, budget_tokens: int | None = None, project_id: int | None = None
+) -> int:
+    from .db import default_project_id
+
     p = await pool()
     budget = budget_tokens or settings.default_budget_tokens
+    pid = project_id or await default_project_id()
+    exists = await p.fetchval("SELECT id FROM projects WHERE id=$1", pid)
+    if not exists:
+        raise ValueError("project not found")
     run_id = await p.fetchval(
-        "INSERT INTO runs(goal, status, budget_tokens) VALUES($1,'queued',$2) RETURNING id",
-        goal, budget)
-    await events.emit(run_id, "run.created", {"goal": goal, "budget_tokens": budget})
+        "INSERT INTO runs(goal, status, budget_tokens, project_id) "
+        "VALUES($1,'queued',$2,$3) RETURNING id",
+        goal, budget, pid)
+    await events.emit(run_id, "run.created", {
+        "goal": goal, "budget_tokens": budget, "project_id": pid,
+    })
     await _enqueue(run_id, "plan")
     return run_id
 

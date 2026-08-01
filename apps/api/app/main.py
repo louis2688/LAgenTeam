@@ -2,7 +2,7 @@ import asyncio
 import hmac
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -15,6 +15,11 @@ from .router import tier_for
 class CreateRun(BaseModel):
     goal: str = Field(min_length=1, max_length=8000)
     budget_tokens: int | None = Field(default=None, ge=1, le=settings.max_budget_tokens)
+    project_id: int | None = Field(default=None, ge=1)
+
+
+class CreateProject(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
 
 
 class Note(BaseModel):
@@ -69,10 +74,8 @@ async def config():
 
 @app.get("/agents")
 async def list_agents():
-    order = {"triage": 0, "planner": 1, "coder": 2, "reviewer": 3}
-    reg = agents_mod.registry()
     items = []
-    for n, c in reg.items():
+    for n, c in agents_mod.active_registry().items():
         prompt = (c.get("system_prompt") or "").strip()
         summary = prompt.split("\n", 1)[0][:220] if prompt else ""
         items.append({
@@ -82,22 +85,68 @@ async def list_agents():
             "tools": c.get("tools", []),
             "summary": summary,
         })
-    items.sort(key=lambda a: order.get(a["name"], 99))
+    items.sort(key=lambda a: agents_mod.ACTIVE_ORDER.get(a["name"], 99))
     return items
+
+
+@app.get("/projects")
+async def list_projects():
+    p = await pool()
+    rows = await p.fetch(
+        "SELECT p.id, p.name, p.created_at, "
+        "COUNT(r.id) AS run_count, "
+        "COUNT(r.id) FILTER (WHERE r.status NOT IN ('done','rejected','failed','killed')) AS open_count, "
+        "COUNT(r.id) FILTER (WHERE r.status = 'done') AS done_count, "
+        "COALESCE(SUM(r.tokens_used), 0) AS tokens_used "
+        "FROM projects p LEFT JOIN runs r ON r.project_id = p.id "
+        "GROUP BY p.id ORDER BY p.id"
+    )
+    return [dict(r) for r in rows]
+
+
+@app.post("/projects")
+async def create_project(body: CreateProject):
+    p = await pool()
+    row = await p.fetchrow(
+        "INSERT INTO projects(name) VALUES($1) RETURNING id, name, created_at",
+        body.name.strip())
+    out = dict(row)
+    out.update({"run_count": 0, "open_count": 0, "done_count": 0, "tokens_used": 0})
+    return out
+
+
+@app.get("/projects/{project_id}")
+async def get_project(project_id: int):
+    p = await pool()
+    proj = await p.fetchrow("SELECT id, name, created_at FROM projects WHERE id=$1", project_id)
+    if not proj:
+        raise HTTPException(404, "project not found")
+    runs = await p.fetch(
+        "SELECT id, goal, status, budget_tokens, tokens_used, project_id, created_at, updated_at "
+        "FROM runs WHERE project_id=$1 ORDER BY id DESC LIMIT 100", project_id)
+    return {"project": dict(proj), "runs": [dict(r) for r in runs]}
 
 
 @app.post("/runs")
 async def create_run(body: CreateRun):
-    run_id = await engine.create_run(body.goal, body.budget_tokens)
+    try:
+        run_id = await engine.create_run(body.goal, body.budget_tokens, body.project_id)
+    except ValueError:
+        raise HTTPException(404, "project not found")
     return {"id": run_id}
 
 
 @app.get("/runs")
-async def list_runs():
+async def list_runs(project_id: int | None = Query(default=None, ge=1)):
     p = await pool()
-    rows = await p.fetch(
-        "SELECT id, goal, status, budget_tokens, tokens_used, created_at, updated_at "
-        "FROM runs ORDER BY id DESC LIMIT 200")
+    if project_id is not None:
+        rows = await p.fetch(
+            "SELECT id, goal, status, budget_tokens, tokens_used, project_id, created_at, updated_at "
+            "FROM runs WHERE project_id=$1 ORDER BY id DESC LIMIT 200", project_id)
+    else:
+        rows = await p.fetch(
+            "SELECT id, goal, status, budget_tokens, tokens_used, project_id, created_at, updated_at "
+            "FROM runs ORDER BY id DESC LIMIT 200")
     return [dict(r) for r in rows]
 
 

@@ -1,10 +1,10 @@
 """Real tool execution for agents: a path-jailed, git-backed workspace per run.
 
 run_shell is arbitrary code execution. It is gated behind ALLOW_SHELL, cwd-jailed to
-the workspace with a timeout, given a MINIMAL env (no secrets), and its output is
-redacted against the process's real secret values as defense in depth. NOTE: this is
-not a true sandbox. For untrusted/multi-tenant input, run it in an isolated container
-with its own network and no secret access.
+the workspace with a timeout, given a MINIMAL env (no secrets), blocked against a
+deny-list of dangerous commands, and its output is redacted against the process's
+real secret values as defense in depth. NOTE: this is not a true multi-tenant
+sandbox. For untrusted input, run it in an isolated container with its own network.
 """
 import os
 import re
@@ -15,15 +15,33 @@ from .config import settings
 WORKSPACE_ROOT = Path(settings.workspace_root)
 
 _SECRET_ENV = ("ANTHROPIC_API_KEY", "DATABASE_URL", "REDIS_URL", "API_TOKEN",
-               "POSTGRES_PASSWORD", "REDIS_PASSWORD")
+               "POSTGRES_PASSWORD", "REDIS_PASSWORD", "SESSION_SECRET",
+               "CONSOLE_PASSWORD")
 _KEY_RE = re.compile(r"sk-ant-\S+")
+
+# Denied when seen as a command token / path-like argument (case-insensitive).
+_SHELL_DENY = re.compile(
+    r"(?:^|[\s;&|`$()<>])(?:"
+    r"curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp|telnet|"
+    r"docker|podman|kubectl|sudo|su|chmod\s+[0-7]*[67]|"
+    r"mkfs|dd\s+if=|/dev/|"
+    r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/|"
+    r":\(\)\s*\{\s*:\|:&\s*\};:"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _safe_env() -> dict:
-    # Minimal env for run_shell: never inherit the app's secrets.
-    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
+    # Minimal env for run_shell: never inherit the app's secrets or proxy settings.
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
+    env = {k: os.environ[k] for k in keep if k in os.environ}
     env.setdefault("PATH", "/usr/local/bin:/usr/local/sbin:/usr/bin:/bin")
     env.setdefault("HOME", "/tmp")
+    # Explicitly neutralize proxy leakage if present in parent.
+    for k in list(os.environ):
+        if k.upper().endswith("_PROXY") or k.upper() in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            env.pop(k, None)
     return env
 
 
@@ -90,15 +108,39 @@ def _resolve(ws: Path, rel: str) -> Path:
     return target
 
 
+def _workspace_bytes(ws: Path) -> int:
+    total = 0
+    for p in ws.rglob("*"):
+        if p.is_file() and ".git" not in p.parts:
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 def read_file(ws: Path, path: str) -> str:
-    return _resolve(ws, path).read_text(encoding="utf-8")
+    raw = _resolve(ws, path).read_bytes()
+    limit = settings.max_read_bytes
+    truncated = len(raw) > limit
+    text = raw[:limit].decode("utf-8", errors="replace")
+    if truncated:
+        return text + f"\n…[truncated at {limit} bytes]"
+    return text
 
 
 def write_file(ws: Path, path: str, content: str) -> str:
+    data = content.encode("utf-8")
+    if len(data) > settings.max_write_bytes:
+        return f"error: write exceeds max_write_bytes ({settings.max_write_bytes})"
+    used = _workspace_bytes(ws)
     t = _resolve(ws, path)
+    existing = t.stat().st_size if t.exists() and t.is_file() else 0
+    if used - existing + len(data) > settings.max_workspace_bytes:
+        return f"error: workspace would exceed max_workspace_bytes ({settings.max_workspace_bytes})"
     t.parent.mkdir(parents=True, exist_ok=True)
-    t.write_text(content, encoding="utf-8")
-    return f"wrote {path} ({len(content)} bytes)"
+    t.write_bytes(data)
+    return f"wrote {path} ({len(data)} bytes)"
 
 
 def list_dir(ws: Path, path: str = ".") -> str:
@@ -106,15 +148,29 @@ def list_dir(ws: Path, path: str = ".") -> str:
     return "\n".join(sorted(p.name + ("/" if p.is_dir() else "") for p in t.iterdir() if p.name != ".git")) or "(empty)"
 
 
+def shell_blocked(command: str) -> str | None:
+    """Return a reason if the command matches the deny-list, else None."""
+    if _SHELL_DENY.search(command or ""):
+        return "command blocked by sandbox deny-list"
+    return None
+
+
 def run_shell(ws: Path, command: str) -> str:
     if not settings.allow_shell:
         return "run_shell is disabled (set ALLOW_SHELL=1 to enable)"
+    reason = shell_blocked(command)
+    if reason:
+        return f"run_shell: {reason}"
+    timeout = max(1, int(settings.shell_timeout_seconds))
+    out_limit = max(256, int(settings.shell_output_bytes))
     try:
-        r = subprocess.run(command, shell=True, cwd=ws, capture_output=True, text=True,
-                           timeout=60, env=_safe_env())
+        r = subprocess.run(
+            command, shell=True, cwd=ws, capture_output=True, text=True,
+            timeout=timeout, env=_safe_env(),
+        )
     except subprocess.TimeoutExpired:
-        return "run_shell: timed out after 60s"
-    return _redact(f"exit={r.returncode}\n{r.stdout}{r.stderr}")[:4000]
+        return f"run_shell: timed out after {timeout}s"
+    return _redact(f"exit={r.returncode}\n{r.stdout}{r.stderr}")[:out_limit]
 
 
 # --- Anthropic tool-use wiring ---
