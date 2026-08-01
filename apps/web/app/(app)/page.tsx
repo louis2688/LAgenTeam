@@ -5,18 +5,13 @@ import { API } from "@/lib/api";
 const DISPLAY: any = {
   triage: { nm: "Scout", role: "Triage", code: "TRI-01" },
   planner: { nm: "Vector", role: "Planner", code: "PLN-02" },
-  pm: { nm: "Relay", role: "Project Manager", code: "PM-05" },
+  architect: { nm: "Beacon", role: "Solution Architect", code: "ARC-03" },
   coder: { nm: "Forge", role: "Developer", code: "DEV-04" },
   tester: { nm: "Probe", role: "QA Engineer", code: "QA-06" },
   reviewer: { nm: "Sentinel", role: "Reviewer . Security", code: "REV-09" },
   docs: { nm: "Scribe", role: "Documentation", code: "DOC-08" },
-  designer: { nm: "Prism", role: "Designer", code: "DSG-07" },
-  devops: { nm: "Helix", role: "DevOps", code: "OPS-06" },
-  architect: { nm: "Beacon", role: "Solution Architect", code: "ARC-03" },
-  po: { nm: "Nova", role: "Product Owner", code: "PO-10" },
-  scrum: { nm: "Cadence", role: "Scrum Master", code: "SM-11" },
 };
-const ORDER = ["triage", "architect", "planner", "coder", "tester", "reviewer", "docs", "pm", "po", "scrum", "designer", "devops"];
+const ORDER = ["triage", "architect", "planner", "coder", "tester", "reviewer", "docs"];
 const NONTERMINAL = ["queued", "planning", "running", "awaiting_approval", "needs_review"];
 const tokfmt = (n: number) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n || 0));
 
@@ -27,6 +22,8 @@ export default function Component() {
   const [loaded, setLoaded] = useState(false);
   const [goal, setGoal] = useState("");
   const [budget, setBudget] = useState(120000);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [projectId, setProjectId] = useState<number | "">("");
 
   async function load() {
     try {
@@ -39,7 +36,15 @@ export default function Component() {
     } catch (e) {} finally { setLoaded(true); }
   }
   useEffect(() => {
-    (async () => { try { setRoster(await (await fetch(API + "/agents")).json()); } catch (e) {} })();
+    (async () => {
+      try { setRoster(await (await fetch(API + "/agents")).json()); } catch (e) {}
+      try {
+        const ps = await (await fetch(API + "/projects")).json();
+        const arr = Array.isArray(ps) ? ps : [];
+        setProjects(arr);
+        if (arr.length) setProjectId(arr[0].id);
+      } catch (e) {}
+    })();
     load();
     const t = setInterval(load, 1500);
     return () => clearInterval(t);
@@ -48,7 +53,17 @@ export default function Component() {
   async function dispatch(e: any) {
     e.preventDefault();
     if (!goal.trim()) return;
-    try { await fetch(API + "/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal, budget_tokens: Number(budget) }) }); setGoal(""); await load(); } catch (e) {}
+    const body: any = { goal, budget_tokens: Number(budget) };
+    if (projectId !== "") body.project_id = Number(projectId);
+    try {
+      await fetch(API + "/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      setGoal("");
+      await load();
+    } catch (e) {}
   }
   async function approve(id: any) { try { await fetch(API + "/runs/" + id + "/approve", { method: "POST" }); await load(); } catch (e) {} }
 
@@ -140,10 +155,10 @@ export default function Component() {
           </div>
         </div>
         <svg className="connectors" viewBox="0 0 100 40" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M50 0 C 50 22 12.5 18 12.5 40" />
-          <path d="M50 0 C 50 22 37.5 18 37.5 40" />
-          <path d="M50 0 C 50 22 62.5 18 62.5 40" />
-          <path d="M50 0 C 50 22 87.5 18 87.5 40" />
+          <path d="M50 0 L50 10 L12.5 10 L12.5 40" />
+          <path d="M50 0 L50 10 L37.5 10 L37.5 40" />
+          <path d="M50 0 L50 10 L62.5 10 L62.5 40" />
+          <path d="M50 0 L50 10 L87.5 10 L87.5 40" />
         </svg>
         <div className="orbit2">
           {sorted.length === 0 ? <div className="empty">Loading roster...</div> : sorted.map((a) => <Card key={a.name} name={a.name} />)}
@@ -160,8 +175,19 @@ export default function Component() {
         <div>
           <div className="panel">
             <h2>New Request</h2>
-            <form onSubmit={dispatch} style={{ display: "flex", gap: 9 }}>
-              <input className="field" placeholder="Describe the goal in plain English..." value={goal} onChange={(e) => setGoal(e.target.value)} />
+            <form onSubmit={dispatch} style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+              <input className="field" placeholder="Describe the goal in plain English..." value={goal} onChange={(e) => setGoal(e.target.value)} style={{ flex: "1 1 240px" }} />
+              <select
+                className="field"
+                style={{ width: 180, flex: "none" }}
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : "")}
+              >
+                {projects.length === 0 ? <option value="">Default project</option> : null}
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
               <input className="field" style={{ width: 116, flex: "none" }} type="number" value={budget} onChange={(e) => setBudget(Number(e.target.value))} />
               <button className="btn primary" type="submit" style={{ flex: "none" }}>Dispatch</button>
             </form>

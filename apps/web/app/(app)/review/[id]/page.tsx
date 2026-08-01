@@ -20,6 +20,8 @@ export default function Component({ params }: { params: Promise<{ id: string }> 
   const { id } = use(params);
   const [run, setRun] = useState<any>(null);
   const [diff, setDiff] = useState<any>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function load() {
     try {
@@ -40,21 +42,37 @@ export default function Component({ params }: { params: Promise<{ id: string }> 
   }, [id]);
 
   async function ship() {
+    setBusy(true);
     try {
       await fetch(API + "/runs/" + id + "/ship", { method: "POST" });
       window.location.href = "/jobs";
-    } catch (e) {}
+    } catch (e) {
+      setBusy(false);
+    }
   }
 
-  async function requestChanges(note: string) {
+  async function requestChanges() {
+    setBusy(true);
     try {
       await fetch(API + "/runs/" + id + "/request_changes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note }),
+        body: JSON.stringify({ note: note.trim() || "Please address the review feedback." }),
       });
-      load();
+      setNote("");
+      await load();
     } catch (e) {}
+    setBusy(false);
+  }
+
+  async function reject() {
+    setBusy(true);
+    try {
+      await fetch(API + "/runs/" + id + "/reject", { method: "POST" });
+      window.location.href = "/jobs";
+    } catch (e) {
+      setBusy(false);
+    }
   }
 
   if (!run) return <div className="empty">Loading job…</div>;
@@ -109,19 +127,29 @@ export default function Component({ params }: { params: Promise<{ id: string }> 
       {status === "needs_review" ? (
         <div className="gate review">
           <h3>Review gate — approve before it ships</h3>
-          <p>Atlas is holding the diff. Approve to commit, or send it back for changes.</p>
+          <p>Approve to commit, request changes to send it back to the coder, or reject to stop the run.</p>
+          <textarea
+            className="field"
+            rows={3}
+            placeholder="Feedback for the coder (used when requesting changes)…"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            style={{ marginBottom: 12 }}
+          />
           <div className="acts">
-            <button className="btn approve" onClick={ship}>
+            <button className="btn approve" onClick={ship} disabled={busy}>
               Approve & commit
             </button>
-            <button className="btn" onClick={() => requestChanges("changes requested")}>
+            <button className="btn" onClick={requestChanges} disabled={busy}>
               Request changes
             </button>
-            <button className="btn reject" onClick={() => requestChanges("rejected")}>
+            <button className="btn reject" onClick={reject} disabled={busy}>
               Reject
             </button>
           </div>
         </div>
+      ) : status === "running" ? (
+        <div className="muted">Rework in progress — coder is applying feedback…</div>
       ) : (
         <div className="muted">Current status: {status.replace("_", " ")}</div>
       )}

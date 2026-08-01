@@ -52,6 +52,8 @@ services:
     environment:
       API_ORIGIN: http://api:8000
       API_TOKEN: ${API_TOKEN:-}
+      CONSOLE_PASSWORD: ${CONSOLE_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
     ports: ["127.0.0.1:3000:3000"]
     security_opt: ["no-new-privileges:true"]
     depends_on: [api]

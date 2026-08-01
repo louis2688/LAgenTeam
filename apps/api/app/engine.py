@@ -1,6 +1,7 @@
 import re
 import json
 import asyncio
+from collections import defaultdict
 from . import agents, events, providers, tools
 from .config import settings
 from .db import pool
@@ -9,13 +10,24 @@ from .router import tier_for
 QUEUE = "lagenteam:queue"
 
 
-async def create_run(goal: str, budget_tokens: int | None = None) -> int:
+async def create_run(
+    goal: str, budget_tokens: int | None = None, project_id: int | None = None
+) -> int:
+    from .db import default_project_id
+
     p = await pool()
     budget = budget_tokens or settings.default_budget_tokens
+    pid = project_id or await default_project_id()
+    exists = await p.fetchval("SELECT id FROM projects WHERE id=$1", pid)
+    if not exists:
+        raise ValueError("project not found")
     run_id = await p.fetchval(
-        "INSERT INTO runs(goal, status, budget_tokens) VALUES($1,'queued',$2) RETURNING id",
-        goal, budget)
-    await events.emit(run_id, "run.created", {"goal": goal, "budget_tokens": budget})
+        "INSERT INTO runs(goal, status, budget_tokens, project_id) "
+        "VALUES($1,'queued',$2,$3) RETURNING id",
+        goal, budget, pid)
+    await events.emit(run_id, "run.created", {
+        "goal": goal, "budget_tokens": budget, "project_id": pid,
+    })
     await _enqueue(run_id, "plan")
     return run_id
 
@@ -30,7 +42,9 @@ async def approve_run(run_id: int) -> bool:
 
 
 async def reject_run(run_id: int) -> bool:
-    if not await _is_status(run_id, "awaiting_approval"):
+    p = await pool()
+    status = await p.fetchval("SELECT status FROM runs WHERE id=$1", run_id)
+    if status not in ("awaiting_approval", "needs_review"):
         return False
     await _set_status(run_id, "rejected")
     await events.emit(run_id, "run.rejected")
@@ -47,10 +61,32 @@ async def ship_run(run_id: int) -> bool:
 
 
 async def request_changes(run_id: int, note: str = "") -> bool:
+    """Send a run back for coder rework instead of rejecting it."""
     if not await _is_status(run_id, "needs_review"):
         return False
-    await _set_status(run_id, "rejected")
-    await events.emit(run_id, "run.changes_requested", {})
+    p = await pool()
+    note = (note or "").strip()
+    await p.execute(
+        "UPDATE runs SET review_note=$2, updated_at=now() WHERE id=$1", run_id, note or None)
+
+    pos = await p.fetchval(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM tasks WHERE run_id=$1", run_id)
+    rework = [
+        {"name": "Apply review feedback", "agent": "coder"},
+        {"name": "Re-review after changes", "agent": "reviewer"},
+    ]
+    for i, t in enumerate(rework):
+        agent_cfg = agents.get(t["agent"])
+        wave = pos + i  # rework stays sequential
+        await p.execute(
+            "INSERT INTO tasks(run_id, name, task_class, agent, model_tier, position, wave) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7)",
+            run_id, t["name"], agent_cfg["task_class"], agent_cfg["name"],
+            tier_for(agent_cfg["task_class"]), pos + i, wave)
+
+    await _set_status(run_id, "running")
+    await events.emit(run_id, "run.changes_requested", {"note": note[:500]})
+    await _enqueue(run_id, "execute")
     return True
 
 
@@ -126,45 +162,81 @@ async def _plan(run_id: int) -> None:
     plan = _parse_plan(c.text, goal)
     for i, t in enumerate(plan):
         agent_cfg = agents.get(t["agent"])
+        wave = t.get("wave", i)
         await p.execute(
-            "INSERT INTO tasks(run_id, name, task_class, agent, model_tier, position) VALUES($1,$2,$3,$4,$5,$6)",
-            run_id, t["name"], agent_cfg["task_class"], agent_cfg["name"], tier_for(agent_cfg["task_class"]), i)
+            "INSERT INTO tasks(run_id, name, task_class, agent, model_tier, position, wave) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7)",
+            run_id, t["name"], agent_cfg["task_class"], agent_cfg["name"],
+            tier_for(agent_cfg["task_class"]), i, wave)
     await p.execute("UPDATE runs SET plan=$2, updated_at=now() WHERE id=$1", run_id, plan)
     await _set_status(run_id, "awaiting_approval")
     await events.emit(run_id, "plan.ready", {"tasks": plan, "tokens": c.tokens})
     await events.emit(run_id, "run.awaiting_approval")
 
 
+def group_by_wave(tasks: list[dict]) -> list[list[dict]]:
+    """Group pending tasks into waves. Same wave runs concurrently; waves run in order."""
+    if not tasks:
+        return []
+    buckets: dict[int, list[dict]] = defaultdict(list)
+    for t in tasks:
+        wave = t.get("wave")
+        if wave is None:
+            wave = t.get("position", 0)
+        buckets[int(wave)].append(t)
+    return [buckets[k] for k in sorted(buckets)]
+
+
 async def _execute(run_id: int) -> None:
     p = await pool()
-    goal = await p.fetchval("SELECT goal FROM runs WHERE id=$1", run_id)
-    rows = await p.fetch("SELECT id, name, agent, model_tier FROM tasks WHERE run_id=$1 ORDER BY position", run_id)
+    row = await p.fetchrow("SELECT goal, review_note FROM runs WHERE id=$1", run_id)
+    goal = row["goal"]
+    review_note = row["review_note"] or ""
+
+    done = await p.fetch(
+        "SELECT name, output FROM tasks WHERE run_id=$1 AND status='done' ORDER BY position", run_id)
     context = f"Goal: {goal}\n"
-    for t in rows:
+    if review_note:
+        context += f"\nReviewer feedback to address:\n{review_note}\n"
+    for t in done:
+        context += f"\n[{t['name']}] {t['output'] or ''}\n"
+
+    pending = await p.fetch(
+        "SELECT id, name, agent, model_tier, position, wave FROM tasks "
+        "WHERE run_id=$1 AND status='pending' ORDER BY position", run_id)
+    waves = group_by_wave([dict(t) for t in pending])
+
+    for wave_tasks in waves:
         if await _over_budget(run_id):
             await _set_status(run_id, "killed")
-            await events.emit(run_id, "run.killed", {"reason": "budget exceeded"}, task_id=t["id"])
+            await events.emit(run_id, "run.killed", {"reason": "budget exceeded"},
+                              task_id=wave_tasks[0]["id"])
             return
 
-        await p.execute("UPDATE tasks SET status='running' WHERE id=$1", t["id"])
-        await events.emit(run_id, "task.started", {"name": t["name"], "agent": t["agent"]}, task_id=t["id"])
+        if len(wave_tasks) == 1:
+            result = await _run_pending_task(run_id, wave_tasks[0], context)
+            if result is None:
+                return
+            context += f"\n[{wave_tasks[0]['name']}] {result}\n"
+        else:
+            await events.emit(run_id, "wave.started", {
+                "wave": wave_tasks[0].get("wave"),
+                "tasks": [t["name"] for t in wave_tasks],
+            })
+            results = await asyncio.gather(*[
+                _run_pending_task(run_id, t, context) for t in wave_tasks
+            ])
+            if any(r is None for r in results):
+                return
+            for t, text in zip(wave_tasks, results):
+                context += f"\n[{t['name']}] {text}\n"
+            await events.emit(run_id, "wave.done", {
+                "wave": wave_tasks[0].get("wave"),
+                "tasks": [t["name"] for t in wave_tasks],
+            })
 
-        agent_cfg = agents.get(t["agent"])
-        try:
-            c = await _run_task(run_id, t["id"], agent_cfg, t["model_tier"], context + f"\nTask: {t['name']}")
-        except Exception as e:  # noqa: BLE001
-            print("[task] error:", type(e).__name__)
-            await p.execute("UPDATE tasks SET status='failed', output=$2 WHERE id=$1", t["id"], "task failed")
-            await events.emit(run_id, "task.failed", {"error": "internal error"}, task_id=t["id"])
-            await _fail(run_id, "task failed")
-            return
-
-        await _add_tokens(run_id, c.tokens)
-        await p.execute("UPDATE tasks SET status='done', output=$2, model=$3, tokens_used=$4 WHERE id=$1",
-                        t["id"], c.text, c.model, c.tokens)
-        await events.emit(run_id, "task.done",
-            {"name": t["name"], "model": c.model, "tokens": c.tokens, "output": c.text[:500]}, task_id=t["id"])
-        context += f"\n[{t['name']}] {c.text}\n"
+    # Clear spent review note once rework round finishes
+    await p.execute("UPDATE runs SET review_note=NULL, updated_at=now() WHERE id=$1", run_id)
 
     d = tools.diff(run_id)
     if d["files"]:
@@ -173,6 +245,33 @@ async def _execute(run_id: int) -> None:
     else:
         await _set_status(run_id, "done")
         await events.emit(run_id, "run.done")
+
+
+async def _run_pending_task(run_id: int, t: dict, context: str) -> str | None:
+    """Run one pending task. Returns output text, or None if the run should stop."""
+    p = await pool()
+    await p.execute("UPDATE tasks SET status='running' WHERE id=$1", t["id"])
+    await events.emit(run_id, "task.started", {"name": t["name"], "agent": t["agent"]}, task_id=t["id"])
+
+    agent_cfg = agents.get(t["agent"])
+    prompt = context + f"\nTask: {t['name']}"
+    try:
+        c = await _run_task(run_id, t["id"], agent_cfg, t["model_tier"], prompt)
+    except Exception as e:  # noqa: BLE001
+        print("[task] error:", type(e).__name__)
+        await p.execute("UPDATE tasks SET status='failed', output=$2 WHERE id=$1", t["id"], "task failed")
+        await events.emit(run_id, "task.failed", {"error": "internal error"}, task_id=t["id"])
+        await _fail(run_id, "task failed")
+        return None
+
+    await _add_tokens(run_id, c.tokens)
+    await p.execute(
+        "UPDATE tasks SET status='done', output=$2, model=$3, tokens_used=$4 WHERE id=$1",
+        t["id"], c.text, c.model, c.tokens)
+    await events.emit(run_id, "task.done",
+        {"name": t["name"], "model": c.model, "tokens": c.tokens, "output": c.text[:500]},
+        task_id=t["id"])
+    return c.text
 
 
 async def _run_task(run_id, task_id, agent_cfg, tier, prompt):
@@ -197,12 +296,24 @@ def _parse_plan(text: str, goal: str) -> list[dict]:
     try:
         start, end = text.find("["), text.rfind("]")
         parsed = json.loads(text[start:end + 1])
-        out = [{"name": str(t["name"]), "agent": t.get("agent", "coder")} for t in parsed if t.get("name")]
+        out = []
+        for i, t in enumerate(parsed):
+            if not t.get("name"):
+                continue
+            item = {"name": str(t["name"]), "agent": t.get("agent", "coder")}
+            if "wave" in t and t["wave"] is not None:
+                item["wave"] = int(t["wave"])
+            else:
+                item["wave"] = i
+            out.append(item)
         if out:
             return out
     except Exception:  # noqa: BLE001
         pass
-    return [{"name": goal, "agent": "coder"}, {"name": "Review the result", "agent": "reviewer"}]
+    return [
+        {"name": goal, "agent": "coder", "wave": 0},
+        {"name": "Review the result", "agent": "reviewer", "wave": 1},
+    ]
 
 
 async def _is_status(run_id: int, status: str) -> bool:
@@ -217,7 +328,9 @@ async def _set_status(run_id: int, status: str) -> None:
 
 async def _add_tokens(run_id: int, tokens: int) -> None:
     p = await pool()
-    await p.execute("UPDATE runs SET tokens_used = tokens_used + $2, updated_at=now() WHERE id=$1", run_id, tokens)
+    await p.execute(
+        "UPDATE runs SET tokens_used = tokens_used + $2, updated_at=now() WHERE id=$1",
+        run_id, tokens)
 
 
 async def _over_budget(run_id: int) -> bool:
