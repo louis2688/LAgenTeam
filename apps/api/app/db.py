@@ -49,14 +49,15 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS events_run_idx ON events(run_id, id);
-CREATE INDEX IF NOT EXISTS runs_project_idx ON runs(project_id, id DESC);
 """
 
 # Idempotent upgrades for databases created before these columns existed.
+# Index on project_id must run AFTER the column is added.
 MIGRATIONS = """
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS review_note TEXT;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS wave INTEGER;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id);
+CREATE INDEX IF NOT EXISTS runs_project_idx ON runs(project_id, id DESC);
 """
 
 
